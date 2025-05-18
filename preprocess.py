@@ -39,13 +39,71 @@ def extract_text_and_title_from_html(html_filepath):
              content_tag = soup.find('body') # 最后尝试 body
 
         if content_tag:
-            # 获取文本，尝试保留段落换行符
+            # 移除不需要的元素
+            for element in content_tag.find_all(['script', 'style', 'iframe', 'img', 'video', 'audio', 'canvas']):
+                element.decompose()
+            
+            # 移除特定的广告和无关内容
+            for element in content_tag.find_all(class_=['rich_media_tool', 'rich_media_meta_list', 'rich_media_meta_nickname', 
+                                                      'rich_media_meta_text', 'rich_media_meta_link', 'rich_media_meta_primary']):
+                element.decompose()
+            
+            # 移除更多广告和无关内容
+            ad_patterns = [
+                r'阅读原文', r'广告', r'点击查看', r'扫码关注', r'长按识别', r'关注我们',
+                r'关注公众号', r'关注订阅号', r'关注服务号', r'关注企业号', r'关注小程序',
+                r'点击阅读', r'点击进入', r'点击链接', r'点击图片', r'点击视频',
+                r'欢迎关注', r'欢迎订阅', r'欢迎分享', r'欢迎转发', r'欢迎点赞',
+                r'欢迎评论', r'欢迎收藏', r'欢迎打赏', r'欢迎赞赏', r'欢迎支持',
+                r'欢迎加入', r'欢迎参与', r'欢迎投稿', r'欢迎合作', r'欢迎咨询',
+                r'欢迎联系', r'欢迎交流', r'欢迎讨论', r'欢迎反馈', r'欢迎建议',
+                r'欢迎举报', r'欢迎投诉', 
+                r'活动', r'报名', r'讲座', r'会议', r'论坛', r'沙龙',
+                r'时间', r'地点', r'费用', r'主办', r'承办', r'协办',
+                r'嘉宾', r'议程', r'咨询', r'联系方式', r'二维码', r'详情',
+                r'预约', r'报名链接', r'扫码', r'免费', r'收费', r'限时',
+                r'名额有限', r'报名截止', r'主办方', r'承办方', r'协办方'
+            ]
+            
+            # 移除包含广告文本的元素
+            for pattern in ad_patterns:
+                for element in content_tag.find_all(text=re.compile(pattern)):
+                    if element.parent:
+                        element.parent.decompose()
+            
+            # 获取文本，保留段落结构
             text = content_tag.get_text(separator='\n', strip=True)
-            # 移除多余的空行
-            text = re.sub(r'\n\s*\n', '\n', text).strip()
-            # 可选：进一步清理特定模式（如广告、页脚等）
-            text = text.replace('阅读原文', '').strip()
-            return title, text
+            
+            # 清理文本
+            # 1. 移除多余的空行
+            text = re.sub(r'\n\s*\n', '\n', text)
+            # 2. 移除特定的广告和宣传文本
+            for pattern in ad_patterns:
+                # 移除包含关键词的整行，或者只移除关键词本身，这里尝试移除整行以提高清理效果
+                text = re.sub(f'.*{pattern}.*$', '', text, flags=re.MULTILINE)
+            # 3. 移除URL
+            text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+            # 4. 移除特殊字符
+            text = re.sub(r'[^\w\s\u4e00-\u9fff：；""''（）【】《》、]', '', text)
+            # 5. 移除重复的标点符号
+            text = re.sub(r'[。，！？：；]{2,}', lambda m: m.group()[0], text)
+            # 6. 移除空白字符
+            text = re.sub(r'\s+', ' ', text)
+            # 7. 移除纯数字行
+            text = re.sub(r'^\d+$', '', text, flags=re.MULTILINE)
+
+            # 8. 检查是否包含活动宣传等模式，如果包含则舍弃整篇文本
+            is_promotional = False
+            for pattern in ad_patterns:
+                if re.search(pattern, text):
+                    is_promotional = True
+                    break
+
+            if is_promotional:
+                print(f"    检测到活动宣传/广告内容，舍弃文件 {html_filepath} 的文本。")
+                return title, None # 舍弃文本内容
+            else:
+                return title, text.strip() # 返回清理后的文本
         else:
             print(f"警告：在文件 {html_filepath} 中未找到明确的正文标签。")
             return title, None # 返回标题，但文本为 None
@@ -57,68 +115,81 @@ def extract_text_and_title_from_html(html_filepath):
         print(f"处理文件 {html_filepath} 时出错: {e}")
         return None, None
 
-def split_text(text, chunk_size=500, chunk_overlap=50):
+def split_text(text, chunk_size=500, chunk_overlap=50, mode="sentence"):
     """
-    将文本分割成指定大小的块，并带有重叠。
-
+    优化的文本分割函数
+    
     Args:
-        text (str): 要分割的文本。
-        chunk_size (int): 每个块的目标字符数。
-        chunk_overlap (int): 相邻块之间的重叠字符数。
-
+        text: 输入文本
+        chunk_size: 目标块大小
+        chunk_overlap: 重叠大小
+        mode: 分割模式 ("char"|"sentence")
+    
     Returns:
-        list[str]: 文本块列表。
+        文本块列表
     """
+    if not text or chunk_size <= chunk_overlap:
+        return []
+    
+    text = text.strip()
     if not text:
         return []
+    
+    if mode == "sentence":
+        return _split_by_sentence(text, chunk_size, chunk_overlap)
+    else:
+        return _split_by_char(text, chunk_size, chunk_overlap)
 
+def _split_by_char(text, chunk_size, chunk_overlap):
     chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start += chunk_size - chunk_overlap
-        if start >= len(text): # 避免无限循环（如果 overlap >= size）
-             break
-        # 如果最后一块太短，并且有重叠，可能导致重复添加，确保不重复
-        if start < chunk_size and len(chunks)>1 and chunks[-1] == chunks[-2][chunk_size-chunk_overlap:]:
-             chunks.pop() # 移除重复的小尾巴
-             start = len(text) # 强制结束
+    text_length = len(text)
+    step = chunk_size - chunk_overlap
+    
+    for i in range(0, text_length, step):
+        chunk = text[i:i+chunk_size].strip()
+        if chunk and (not chunks or chunk != chunks[-1]):  # 避免重复
+            chunks.append(chunk)
+    return chunks
 
-    # 处理最后一块可能不足 chunk_size 的情况
-    if start < len(text) and start > 0 : # 确保不是第一个块就小于size
-         last_chunk = text[start-chunk_size+chunk_overlap:]
-         if chunks and last_chunk != chunks[-1]: # 避免重复添加完全相同的最后一块
-            # 检查是否和上一个块的尾部重复太多
-            if not chunks[-1].endswith(last_chunk):
-                 chunks.append(last_chunk)
-         elif not chunks: # 如果是唯一一块且小于size
-             chunks.append(last_chunk)
-
-
-    # 更简洁的实现 (可能需要微调确保边界情况)
-    # chunks = []
-    # for i in range(0, len(text), chunk_size - chunk_overlap):
-    #     chunk = text[i:i + chunk_size]
-    #     if chunk: # 确保不添加空块
-    #         chunks.append(chunk)
-    # # 确保最后一部分被包含 (如果上面步长导致遗漏)
-    # if chunks and len(text) > (len(chunks) -1) * (chunk_size - chunk_overlap) + chunk_size :
-    #      last_start = (len(chunks) -1) * (chunk_size - chunk_overlap)
-    #      final_chunk = text[last_start:]
-    #      if final_chunk != chunks[-1]: # 避免重复
-    #          # 可以考虑合并最后两个块如果最后一个太小，或直接添加
-    #           if len(final_chunk) > chunk_overlap : # 避免添加太小的重叠部分
-    #               chunks.append(final_chunk[overlap:]) # 只添加新的部分? 或者完整添加? 取决于需求
-    #               # 简单起见，先完整添加
-    #               chunks.append(text[last_start + chunk_size - chunk_overlap:])
-
-
-    return [c.strip() for c in chunks if c.strip()] # 返回非空块
+def _split_by_sentence(text, chunk_size, chunk_overlap):
+    sentences = re.split(r'(?<=[。！？])\s+', text)
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    
+    for sentence in sentences:
+        sent_len = len(sentence)
+        if current_length + sent_len <= chunk_size:
+            current_chunk.append(sentence)
+            current_length += sent_len
+        else:
+            if current_chunk:
+                chunk = ' '.join(current_chunk).strip()
+                if chunk:
+                    chunks.append(chunk)
+            
+            # 计算重叠部分
+            overlap = []
+            overlap_len = 0
+            for sent in reversed(current_chunk):
+                if overlap_len + len(sent) > chunk_overlap:
+                    break
+                overlap.insert(0, sent)
+                overlap_len += len(sent)
+            
+            current_chunk = overlap + [sentence]
+            current_length = overlap_len + sent_len
+    
+    if current_chunk:
+        chunk = ' '.join(current_chunk).strip()
+        if chunk:
+            chunks.append(chunk)
+    
+    return chunks
 
 # --- 配置 ---
-html_directory = './data/leuka_data/html' # **** 修改为你的 HTML 文件夹路径 ****
-output_json_path = './data/processed_data.json' # **** 输出 JSON 文件路径 ****
+html_directory = './data/html' # **** 修改为你的 HTML 文件夹路径 ****
+output_json_path = './data/processed_datanew.json' # **** 输出 JSON 文件路径 ****
 CHUNK_SIZE = 512  # 每个文本块的目标大小（字符数）
 CHUNK_OVERLAP = 50 # 相邻文本块的重叠大小（字符数）
 
